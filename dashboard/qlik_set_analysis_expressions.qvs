@@ -1,0 +1,43 @@
+// ============================================================================
+// QLIK SAAS ASSOCIATIVE ENGINE & SET ANALYSIS SCRIPT (dashboard/qlik_set_analysis_expressions.qvs)
+// Prevents Synthetic Keys ($Syn) via Composite %SKU_Plant_Month_Key Bridge
+// ============================================================================
+
+// --- 1. CANONICAL LINK TABLE LOAD PATTERN (PREVENTING $Syn TABLES) ---
+Bridge_SKU_Plant_Month:
+LOAD DISTINCT
+    sku_id & '|' & plant_id & '|' & order_year_month AS %SKU_Plant_Month_Key,
+    sku_id,
+    plant_id,
+    order_year_month AS year_month
+RESIDENT Raw_Orders_Clean;
+
+CONCATENATE (Bridge_SKU_Plant_Month)
+LOAD DISTINCT
+    sku_id & '|' & plant_id & '|' & snapshot_month AS %SKU_Plant_Month_Key,
+    sku_id,
+    plant_id,
+    snapshot_month AS year_month
+RESIDENT Raw_Inventory_Clean
+WHERE NOT Exists(%SKU_Plant_Month_Key, sku_id & '|' & plant_id & '|' & snapshot_month);
+
+// Drop duplicate foreign keys from individual fact tables so all associations flow cleanly through Bridge_SKU_Plant_Month
+DROP FIELDS sku_id, plant_id FROM Fact_Orders_Fulfillment;
+DROP FIELDS sku_id, plant_id FROM Fact_Inventory_Forecast;
+
+// --- 2. MASTER MEASURE SET ANALYSIS EXPRESSIONS ---
+
+// Measure 1: vKPI_OTIF_Pct
+SET vKPI_OTIF_Pct = "Count(DISTINCT {<is_otif={1}, dq_clean_flag={1}>} order_id) / Alt(Count(DISTINCT {<dq_clean_flag={1}>} order_id), 1)";
+
+// Measure 2: vKPI_WAPE_t3_Pct
+SET vKPI_WAPE_t3_Pct = "Sum({<horizon_months={3}>} Fabs(actual_demand_qty - fcst_lgbm_t3_qty)) / Alt(Sum({<horizon_months={3}>} actual_demand_qty), 1)";
+
+// Measure 3: vKPI_Forecast_Bias_Pct
+SET vKPI_Forecast_Bias_Pct = "Sum({<horizon_months={3}>} (fcst_lgbm_t3_qty - actual_demand_qty)) / Alt(Sum({<horizon_months={3}>} actual_demand_qty), 1)";
+
+// Measure 4: vKPI_Days_Of_Supply
+SET vKPI_Days_Of_Supply = "Sum({<snapshot_month={'$(=MaxString(snapshot_month))'}>} on_hand_qty) / Alt(Sum({<snapshot_month={'>=$(=Date(AddMonths(Max(snapshot_date), -2), ''YYYY-MM''))<=$(=MaxString(snapshot_month))'}>} actual_demand_qty) / 90.0, 0.1)";
+
+// Measure 5: vKPI_FEFO_Value_At_Risk_INR
+SET vKPI_FEFO_Value_At_Risk_INR = "Sum({<snapshot_month={'$(=MaxString(snapshot_month))'}, is_expiry_risk={1}>} Aggr(RangeMax(0, Sum(on_hand_qty) - (Avg(avg_daily_demand) * Min(remaining_shelf_life_days))) * Only(unit_cost_inr), batch_id, sku_id))";

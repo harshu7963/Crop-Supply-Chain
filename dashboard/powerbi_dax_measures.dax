@@ -1,0 +1,87 @@
+// ============================================================================
+// PRODUCTION POWER BI DAX MEASURES (dashboard/powerbi_dax_measures.dax)
+// Syngenta India CP P&S Supply Chain Control Tower
+// ============================================================================
+
+// 1. On-Time In-Full (OTIF %) at Deduplicated Order Header Grain
+OTIF % = 
+VAR TotalCleanOrders = DISTINCTCOUNT(Fact_Orders_Fulfillment[order_id])
+VAR OTIFOrders = 
+    CALCULATE(
+        DISTINCTCOUNT(Fact_Orders_Fulfillment[order_id]),
+        Fact_Orders_Fulfillment[is_otif] = 1,
+        Fact_Orders_Fulfillment[dq_clean_flag] = 1
+    )
+RETURN
+    DIVIDE(OTIFOrders, TotalCleanOrders, 0)
+
+// 2. On-Time Delivery % (OTD %)
+On-Time % = 
+DIVIDE(
+    CALCULATE(
+        DISTINCTCOUNT(Fact_Orders_Fulfillment[order_id]),
+        Fact_Orders_Fulfillment[is_on_time] = 1,
+        Fact_Orders_Fulfillment[dq_clean_flag] = 1
+    ),
+    DISTINCTCOUNT(Fact_Orders_Fulfillment[order_id]),
+    0
+)
+
+// 3. Weighted Absolute Percentage Error (WAPE %) at t+3 Horizon
+WAPE % = 
+VAR AbsErrorSum = 
+    SUMX(
+        Fact_Inventory_Forecast,
+        ABS(Fact_Inventory_Forecast[actual_demand_qty] - Fact_Inventory_Forecast[fcst_lgbm_t3_qty])
+    )
+VAR ActualDemandSum = SUM(Fact_Inventory_Forecast[actual_demand_qty])
+RETURN
+    DIVIDE(AbsErrorSum, ActualDemandSum, 0)
+
+// 4. Forecast Accuracy % (1 - WAPE)
+Forecast Accuracy % = 1.0 - [WAPE %]
+
+// 5. Forecast Bias % (Signed Error / Actual Demand)
+Forecast Bias % = 
+VAR SignedErrorSum = 
+    SUMX(
+        Fact_Inventory_Forecast,
+        Fact_Inventory_Forecast[fcst_lgbm_t3_qty] - Fact_Inventory_Forecast[actual_demand_qty]
+    )
+VAR ActualDemandSum = SUM(Fact_Inventory_Forecast[actual_demand_qty])
+RETURN
+    DIVIDE(SignedErrorSum, ActualDemandSum, 0)
+
+// 6. Days of Supply (DOH) using Trailing 90-Day Demand Rate
+Days of Supply (DOH) = 
+VAR CurrentOnHand = 
+    CALCULATE(
+        SUM(Fact_Inventory_Forecast[on_hand_qty]),
+        LASTDATE(Dim_Calendar[date_key])
+    )
+VAR Trailing90dDailyDemand = 
+    DIVIDE(
+        CALCULATE(
+            SUM(Fact_Inventory_Forecast[actual_demand_qty]),
+            DATESINPERIOD(Dim_Calendar[date_key], LASTDATE(Dim_Calendar[date_key]), -3, MONTH)
+        ),
+        90.0,
+        0
+    )
+RETURN
+    DIVIDE(CurrentOnHand, Trailing90dDailyDemand, 0)
+
+// 7. Value at Risk of Expiry (FEFO Write-Off Exposure in INR)
+Value at Risk of Expiry (INR) = 
+SUMX(
+    FILTER(
+        Fact_Inventory_Forecast,
+        Fact_Inventory_Forecast[snapshot_month] = MAX(Fact_Inventory_Forecast[snapshot_month])
+            && Fact_Inventory_Forecast[projected_sell_through_days] > Fact_Inventory_Forecast[remaining_shelf_life_days]
+    ),
+    MAX(
+        0,
+        Fact_Inventory_Forecast[on_hand_qty] 
+            - (Fact_Inventory_Forecast[avg_daily_demand] * Fact_Inventory_Forecast[remaining_shelf_life_days])
+    ) * RELATED(Dim_SKU[unit_cost_inr])
+)
